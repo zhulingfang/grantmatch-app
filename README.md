@@ -1,2 +1,2 @@
 # grantmatch-app
-AI-powered grant call matcher and proposal draft assistant
+Streamlit + Python app that ingests publications/proposals, searches NSF/DOE/Grants.gov opportunities, ranks fit using GPT, and drafts proposal outlines

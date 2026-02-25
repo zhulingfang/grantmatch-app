@@ -4,7 +4,7 @@ import json
 import time
 from io import BytesIO
 
-from services.ingest import extract_proposal_texts
+from services.ingest import extract_proposal_texts, extract_pdf_text_from_urls
 from services.calls import fetch_calls, NSF_FUNDING_RSS, DOE_OSC_FOA_RSS
 from services.profile import build_prof_profile
 from services.match import rank_calls
@@ -28,15 +28,24 @@ def cached_calls(use_nsf: bool, use_doe: bool, use_grants: bool, keywords: tuple
     )
 
 # ---------- Helpers ----------
-def _combine_publication_inputs(publications_text: str, summaries_text: str) -> str:
+def _combine_publication_inputs(publications_text: str, summaries_text: str, pdf_text: str = "") -> str:
+    parts = []
     pubs = (publications_text or "").strip()
     sums = (summaries_text or "").strip()
-    if pubs and sums:
-        return f"Publication titles/list:\n{pubs}\n\nPublication summaries:\n{sums}"
-    return pubs or sums or ""
+    pdfs = (pdf_text or "").strip()
+
+    if pubs:
+        parts.append(f"Publication titles/list:\n{pubs}")
+    if sums:
+        parts.append(f"Publication summaries:\n{sums}")
+    if pdfs:
+        parts.append(f"Publication PDF extracted text:\n{pdfs}")
+
+    return "\n\n".join(parts).strip()
 
 def _make_project_bundle() -> dict:
     return {
+        "publication_pdf_urls": st.session_state.get("publication_pdf_urls", ""),
         "publications_text": st.session_state.get("publications_text", ""),
         "publication_summaries_text": st.session_state.get("publication_summaries_text", ""),
         "proposals_text": st.session_state.get("proposals_text", ""),
@@ -46,6 +55,7 @@ def _make_project_bundle() -> dict:
     }
 
 def _load_project_bundle(bundle: dict):
+    st.session_state.publication_pdf_urls = bundle.get("publication_pdf_urls", "")
     st.session_state.publications_text = bundle.get("publications_text", "")
     st.session_state.publication_summaries_text = bundle.get("publication_summaries_text", "")
     st.session_state.proposals_text = bundle.get("proposals_text", "")
@@ -59,6 +69,7 @@ def _load_project_bundle(bundle: dict):
 
 # ---------- Session state ----------
 defaults = {
+    "publication_pdf_urls": "",
     "publications_text": "",
     "publication_summaries_text": "",
     "proposals_text": "",
@@ -88,6 +99,11 @@ with st.sidebar:
             st.error(f"Failed to load project JSON: {e}")
 
     st.header("Inputs")
+    st.text_area(
+        "Publication ARXIV PDF URLs (optional, one per line)",
+        height=100,
+        key="publication_pdf_urls"
+    )
     st.text_area(
         "Publication list / titles (paste LaTeX or plain text)",
         height=180,
@@ -134,14 +150,14 @@ if run_btn:
     st.session_state.attempt_id = 0
     st.session_state.last_step = "started"
 
-    pubs_combined = _combine_publication_inputs(
-        st.session_state.publications_text,
-        st.session_state.publication_summaries_text
-    )
+    # Extract publication PDF text (optional)
+    pdf_url_lines = (st.session_state.get("publication_pdf_urls") or "").splitlines()
+    pdf_urls = [u.strip() for u in pdf_url_lines if u.strip()]
 
-    if not pubs_combined.strip():
-        st.error("Please paste publication titles/list (and optionally summaries) before running.")
-        st.stop()
+    pdf_pub_text = ""
+    if pdf_urls:
+        with st.spinner("Reading publication PDFs from URLs..."):
+            pdf_pub_text = extract_pdf_text_from_urls(pdf_urls, max_urls=5, max_chars_per_pdf=6000)
 
     with st.spinner("Reading prior proposals..."):
         # Only re-extract if new files uploaded this run; otherwise keep loaded text if any
@@ -152,8 +168,13 @@ if run_btn:
     with st.spinner("Building professor profile..."):
         pubs_combined = _combine_publication_inputs(
             st.session_state.publications_text,
-            st.session_state.publication_summaries_text
+            st.session_state.publication_summaries_text,
+            pdf_pub_text,
         )
+
+        if not pubs_combined.strip():
+            st.error("Please paste publication titles/list (and optionally summaries) before running.")
+            st.stop()
 
         can_reuse = (
             reuse_saved_profile

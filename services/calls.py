@@ -105,7 +105,6 @@ def fetch_calls(
         try:
             nsf = _fetch_rss(NSF_FUNDING_RSS, "NSF", limit_each)
             calls.extend(nsf)
-            errors.append(f"DEBUG: NSF returned {len(nsf)} items")
         except Exception as e:
             errors.append(f"NSF RSS failed: {e}")
 
@@ -113,7 +112,6 @@ def fetch_calls(
         try:
             doe = _fetch_rss(DOE_OSC_FOA_RSS, "DOE", limit_each)
             calls.extend(doe)
-            errors.append(f"DEBUG: DOE returned {len(doe)} items")
         except Exception as e:
             errors.append(f"DOE RSS failed: {e}")
 
@@ -122,7 +120,6 @@ def fetch_calls(
             kw = list(keywords) if keywords else []
             gg = _fetch_grants_gov(kw, limit=min(limit_each, 50))
             calls.extend(gg)
-            errors.append(f"DEBUG: Grants.gov returned {len(gg)} items")
         except Exception as e:
             errors.append(f"Grants.gov failed: {e}")
 

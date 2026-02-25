@@ -6,8 +6,9 @@ from typing import Iterable, List, Optional, Tuple
 
 import requests
 from bs4 import BeautifulSoup
-from pypdf import PdfReader
+import pypdf
 from docx import Document
+import io
 
 # -----------------------------
 # Config
@@ -52,6 +53,71 @@ def _normalize_whitespace(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
+def _extract_title_and_abstract(text: str) -> str:
+    """
+    Heuristic extraction of title + abstract from PDF text.
+    Returns a compact text block:
+      Title: ...
+      Summary: ...
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+
+    # Split into non-empty lines
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # Heuristic title: first non-trivial line(s) before "Abstract"
+    title = ""
+    abs_idx = None
+    for i, ln in enumerate(lines[:30]):
+        if re.match(r"(?i)^abstract\b", ln):
+            abs_idx = i
+            break
+
+    if abs_idx is not None:
+        # title likely appears before Abstract
+        title_candidates = [ln for ln in lines[:abs_idx] if len(ln) > 8]
+        if title_candidates:
+            # usually first long line is title
+            title = title_candidates[0]
+    else:
+        # fallback: first decent line
+        for ln in lines[:10]:
+            if len(ln) > 12:
+                title = ln
+                break
+
+    # Extract abstract block
+    summary = ""
+    joined = "\n".join(lines)
+
+    # Common patterns: "Abstract", "ABSTRACT"
+    m = re.search(
+        r"(?is)\babstract\b[:\s\-]*\n?(.*?)(\n\s*(1\.?\s+introduction|introduction|keywords|index terms)\b)",
+        joined
+    )
+    if m:
+        summary = m.group(1).strip()
+    else:
+        # fallback: take ~1200 chars after 'abstract'
+        m2 = re.search(r"(?is)\babstract\b[:\s\-]*\n?(.*)", joined)
+        if m2:
+            summary = m2.group(1).strip()[:1200]
+        else:
+            # fallback fallback: use beginning text (after title)
+            summary = joined[:1200]
+
+    # Clean summary noise
+    summary = re.sub(r"\s+", " ", summary).strip()
+
+    out = []
+    if title:
+        out.append(f"Title: {title}")
+    if summary:
+        out.append(f"Summary: {summary}")
+
+    return "\n".join(out).strip()
 
 # -----------------------------
 # 1) Extract proposals text (PDF/DOCX)
@@ -99,6 +165,106 @@ def _extract_docx_text(file_obj) -> str:
 # -----------------------------
 # 2) Publications ingestion (URL or paste)
 # -----------------------------
+# services/ingest.py
+def extract_pdf_text_from_urls(
+    pdf_urls: List[str],
+    max_urls: int = 5,
+    max_chars_per_pdf: int = 6000,
+    timeout: int = 20,
+) -> str:
+    """
+    Download PDFs from URLs and extract text (first pages only until char budget reached).
+    Returns concatenated text for all PDFs.
+    """
+    if not pdf_urls:
+        return ""
+
+    chunks = []
+
+    for raw_url in pdf_urls[:max_urls]:
+        url = (raw_url or "").strip()
+        if not url:
+            continue
+
+        # Normalize arXiv URLs (allow missing .pdf)
+        if "arxiv.org/pdf/" in url and not url.endswith(".pdf"):
+            url = url + ".pdf"
+
+        try:
+            resp = requests.get(url, timeout=timeout)
+            resp.raise_for_status()
+
+            content_type = (resp.headers.get("Content-Type") or "").lower()
+            if "pdf" not in content_type and not url.lower().endswith(".pdf"):
+                # not a PDF response
+                continue
+
+            pdf_bytes = io.BytesIO(resp.content)
+            reader = pypdf.PdfReader(pdf_bytes)
+
+            text_parts = []
+            total_chars = 0
+
+            # read pages until char cap
+            for page in reader.pages:
+                page_text = page.extract_text() or ""
+                page_text = page_text.strip()
+                if not page_text:
+                    continue
+
+                remaining = max_chars_per_pdf - total_chars
+                if remaining <= 0:
+                    break
+
+                page_text = page_text[:remaining]
+                text_parts.append(page_text)
+                total_chars += len(page_text)
+
+            if text_parts:
+                chunks.append(f"\n\n[PDF SOURCE: {url}]\n" + "\n".join(text_parts))
+
+        except Exception:
+            # Silent fail for now (or log if you want)
+            continue
+
+    return "\n".join(chunks).strip()
+
+def _extract_text_from_single_pdf_url(url: str, max_chars: int = 4000) -> str:
+    """
+    Download one PDF and extract a compact block containing title + abstract/summary.
+    """
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
+
+    content_type = resp.headers.get("Content-Type", "").lower()
+    if "pdf" not in content_type and not url.lower().endswith(".pdf"):
+        raise ValueError(f"URL did not look like a PDF (Content-Type={content_type})")
+
+    pdf_bytes = io.BytesIO(resp.content)
+    reader = PdfReader(pdf_bytes)
+
+    # Read first 2 pages (usually enough for title + abstract)
+    text_parts = []
+    for page in reader.pages[:2]:
+        try:
+            page_text = page.extract_text() or ""
+        except Exception:
+            page_text = ""
+        if page_text:
+            text_parts.append(page_text)
+
+    raw = _clean_pdf_text("\n".join(text_parts))
+    compact = _extract_title_and_abstract(raw)
+
+    return compact[:max_chars]
+
+def _clean_pdf_text(text: str) -> str:
+    text = text or ""
+    # normalize whitespace
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 def fetch_publications_text(
     url: str = "",
